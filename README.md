@@ -6,13 +6,28 @@
 * Features
 * Prerequisites
 * Examples
-* Comparison to correlations
+* Comparison to simple correlations
 * Future Work
 
 ## Motivation
 This project came out of a desire to characterize the US stock market movements and those days when all stocks moved in the same direction, in the same way; all stocks are essentially “in-sync”. Obviously such days will have a large effect on any trading strategy as a stock’s price movement is dictated by the overall market movement; you may be swimming against the tide. The idea of Pack Correlation may be a suitable metric to gauge this market behaviour. 
 
 >PackCorrelation calculates the correlation of assets in a basket to a target asset (alpha) and creates a dataframe of the daily average correlation for the basket, the max (beta), median (epsilon) and least correlated assets (sigma) plus the most anticorrlated asset (omega). These quantities define the "pack".
+
+Mathematically the average pack correlation is:
+
+<img src="https://latex.codecogs.com/svg.image?\overline{\rho&space;}_{x,\alpha&space;}&space;=&space;\frac{1}{N}\sum_{i}^{N}\rho&space;_{x_{i},\alpha&space;}">
+
+where &alpha; is the stock to which others are compared, <img src="https://latex.codecogs.com/svg.image?x_{i}&space;"> is the <img src="https://latex.codecogs.com/svg.image?i^{th}"> ticker in the pack and N is the size of the pack.
+
+So therefore the other members of the pack can be defined as follows:
+
+<img src="https://latex.codecogs.com/svg.image?\beta&space;=&space;max(\rho&space;_{x_i,&space;\alpha})">
+<img src="https://latex.codecogs.com/svg.image?\epsilon&space;=&space;median(\rho&space;_{x_i,&space;\alpha})">
+
+<img src="https://latex.codecogs.com/svg.image?\Omega&space;=&space;min(\rho&space;_{x_i,&space;\alpha})">
+<img src="https://latex.codecogs.com/svg.image?\sigma&space;=&space;min(\left|&space;\rho&space;_{x_i,&space;\alpha}\right|)">
+
 
 ## Features
 * Calculate an average correlation for group of stocks to a predefined lead/alpha stock for each day under consideration
@@ -82,7 +97,7 @@ Volume                 3033426.0
 Name: 189366, dtype: object
 ```
 
-Now that we have the correct data structures we can easily calculate the pack correlation.
+Now that we have the correct data structures we can easily calculate the pack correlation for each day under consideration.
 
 ```python
 # Create instance of the PackCorrelation class passing previously defined data and ticker_dates
@@ -186,6 +201,10 @@ Close-data plotted for TSLA
 ```
 ![image](https://user-images.githubusercontent.com/102587512/161966478-c50c896b-58dc-4224-acd8-8fbd666c16f7.png)
 
+## Comparison to simple correlations
+It is reasonable to ask why we would use this pack correlation method over simply finding correlations between all the stocks of interest. This would give a more complete picture but would also include many spurious correlation we may not be interested; we want to know how the pack relates specifically to the alpha. Furthermore a simple calculation shows us that this complete approach may take significantly longer to achieve.
+
+Take the above example, 560 stocks for the previous year of 252 trading days. In total there will be n(n-1)/2 correlation calculations between the stocks for any given day. For large enough numbers we can approximate this to n<sup>2</sup>  leading to, in the Big Oh notation, O(n<sup>2</sup>). Whereas for the pack correlation method we only have to make 559 correlation calculation of stocks to the alpha or O(n) in time complexity. In our above example this means approximately 280 times less work. This is one reason why this pack correlation method is clearly advantageous.
 
 ## Future Work
 * For a given date, find correlations as a function of time
