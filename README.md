@@ -213,6 +213,7 @@ Take the above example, 560 stocks for the previous year of 252 trading days. In
 * Allow for pack correlation calculation for different granularity of data e.g. 5min, 1 hour, 1 day candles
 * Add error estimation
 * Provide features for cryptocurrencies
+* Add automatic ticker_dates calculator for given data
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
