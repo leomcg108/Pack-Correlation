@@ -31,13 +31,25 @@ CLOSES = {
 EXPECTED_CORR = {"TWIN": 1.0, "MIRROR": -1.0, "MID": 0.9, "WEAK": -0.2}
 
 
-def _write_ticker_csv(directory, ticker: str, closes: list[int]) -> None:
-    """Write one "TICKER-1m.csv" in the layout yfinance produces."""
+def _write_ticker_csv(
+    directory,
+    ticker: str,
+    closes: list[int],
+    skip_minutes: set[int] = frozenset(),
+    days: list[dt.date] | None = None,
+) -> None:
+    """Write one "TICKER-1m.csv" in the layout yfinance produces.
+
+    `skip_minutes` omits bars from every day, standing in for a ticker with
+    gaps in its intraday data; `days` overrides which dates it trades on.
+    """
     rows = ["Datetime,Open,High,Low,Close,Adj Close,Volume"]
 
-    for day in TRADING_DAYS:
+    for day in days or TRADING_DAYS:
         market_open = dt.datetime.combine(day, dt.time(9, 30))
         for minute, close in enumerate(closes):
+            if minute in skip_minutes:
+                continue
             stamp = market_open + dt.timedelta(minutes=minute)
             rows.append(
                 f"{stamp:%Y-%m-%d %H:%M:%S},{close},{close + 1},{close - 1},"
@@ -45,6 +57,16 @@ def _write_ticker_csv(directory, ticker: str, closes: list[int]) -> None:
             )
 
     (directory / f"{ticker}-1m.csv").write_text("\n".join(rows) + "\n")
+
+
+def _extractor_for(directory) -> FinDataExtract:
+    """Load a directory of ticker CSVs into `data` and `ticker_dates`."""
+    fde = FinDataExtract()
+    fde.set_file_path(str(directory))
+    fde.pop_data_dict()
+    fde.pop_ticker_dates()
+
+    return fde
 
 
 @pytest.fixture
@@ -59,9 +81,31 @@ def market_dir(tmp_path):
 @pytest.fixture
 def extractor(market_dir):
     """A FinDataExtract with `data` and `ticker_dates` built from `market_dir`."""
-    fde = FinDataExtract()
-    fde.set_file_path(str(market_dir))
-    fde.pop_data_dict()
-    fde.pop_ticker_dates()
+    return _extractor_for(market_dir)
 
-    return fde
+
+@pytest.fixture
+def gapped_extractor(tmp_path):
+    """A market whose second ticker is 2 * ALPHA but missing a mid-day bar.
+
+    Every bar GAPPED does have is exactly twice the alpha's, so the only
+    correct correlation is 1.0 no matter which minute is missing.
+    """
+    _write_ticker_csv(tmp_path, "ALPHA", CLOSES["ALPHA"])
+    _write_ticker_csv(tmp_path, "GAPPED", CLOSES["TWIN"], skip_minutes={2})
+
+    return _extractor_for(tmp_path)
+
+
+@pytest.fixture
+def disjoint_extractor(tmp_path):
+    """A market where no ticker shares a trading day with the alpha."""
+    _write_ticker_csv(tmp_path, "ALPHA", CLOSES["ALPHA"])
+    _write_ticker_csv(
+        tmp_path,
+        "OTHER",
+        CLOSES["TWIN"],
+        days=[dt.date(2022, 4, 11), dt.date(2022, 4, 12)],
+    )
+
+    return _extractor_for(tmp_path)

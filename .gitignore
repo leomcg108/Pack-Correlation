@@ -8,3 +8,6 @@ venv/
 
 # Tool caches
 .pytest_cache/
+
+# Local notes
+Plan.md

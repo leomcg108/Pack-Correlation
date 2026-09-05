@@ -47,6 +47,18 @@ class PackCorrelation:
         else:
             print(f"{alpha} not in data dictionary")
 
+    @staticmethod
+    def _close_by_minute(day_slice: pd.DataFrame) -> pd.Series:
+        """Return a day's Close prices indexed by timestamp.
+
+        Correlations are computed against this index so that two tickers are
+        compared minute-for-minute. Repeated timestamps are dropped, since a
+        duplicated index cannot be aligned.
+        """
+        series = day_slice.set_index("Datetime")["Close"]
+
+        return series[~series.index.duplicated(keep="first")]
+
     def find_pack_correlation(
         self,
         start_index: int | None = None,
@@ -76,7 +88,6 @@ class PackCorrelation:
         for index_num, date in enumerate(
             self.ticker_dates[self.alpha][start_index:end_index]
         ):
-            corr_list = []
             ticker_corr = {}
             day = date[:3]
 
@@ -89,8 +100,8 @@ class PackCorrelation:
                 alpha_data["Close"][alpha_close] / alpha_data["Open"][alpha_open]
             )
 
-            alpha_slice = alpha_slice["Close"].reset_index(drop=True)
-            len_day = len(alpha_slice)
+            alpha_series = self._close_by_minute(alpha_slice)
+            len_day = len(alpha_series)
 
             direction = 1 if alpha_gain > 1 else -1
 
@@ -106,19 +117,25 @@ class PackCorrelation:
                 index_open = self.ticker_dates[ticker][index_day][3]
                 index_close = self.ticker_dates[ticker][index_day][4] - 1
                 day_slice = self.data[ticker][index_open:index_close]
-                day_slice = day_slice["Close"].reset_index(drop=True)
+                day_series = self._close_by_minute(day_slice)
 
-                # check that slice is a full day of data
-                if len(day_slice) > len_day - 10:
-                    corr = alpha_slice.corr(day_slice)
-                    corr_list.append(corr)
-                    ticker_corr[ticker] = corr
+                # check that enough of the day lines up with the alpha's bars
+                overlap = alpha_series.index.intersection(day_series.index)
+                if len(overlap) > len_day - 10:
+                    corr = alpha_series.corr(day_series)
+                    if not isnan(corr):
+                        ticker_corr[ticker] = corr
 
-            corr_list = [x for x in corr_list if not isnan(x)]
+            corr_list = list(ticker_corr.values())
+            self.dist_date[(day[2], day[0], day[1])] = corr_list
+
+            # nothing correlated on this day, so there is no pack to describe
+            if not ticker_corr:
+                continue
 
             day_corr = mean(corr_list)
             median_corr = median_high(corr_list)
-            stdev_corr = stdev(corr_list)
+            stdev_corr = stdev(corr_list) if len(corr_list) > 1 else float("nan")
 
             beta = max(ticker_corr, key=ticker_corr.get)
             beta_corr = ticker_corr[beta]
@@ -129,22 +146,21 @@ class PackCorrelation:
             abs_ticker_corr = {
                 key: abs(val) for key, val in ticker_corr.items() if val != 0
             }
+            if not abs_ticker_corr:  # every correlation was exactly zero
+                abs_ticker_corr = dict.fromkeys(ticker_corr, 0.0)
             sigma = min(abs_ticker_corr, key=abs_ticker_corr.get)
             sigma_corr = ticker_corr[sigma]
 
             omega = min(ticker_corr, key=ticker_corr.get)
             omega_corr = ticker_corr[omega]
 
-            self.dist_date[(day[2], day[0], day[1])] = corr_list
-
             day_corr_dir = day_corr * direction if day_corr > 0 else 0
 
-            if not isnan(day_corr):
-                self.corr_date.loc[index_num] = (
-                    day, day_corr, day_corr_dir, median_corr, stdev_corr,
-                    alpha_gain, beta, beta_corr, epsilon, epsilon_corr,
-                    sigma, sigma_corr, omega, omega_corr,
-                )
+            self.corr_date.loc[index_num] = (
+                day, day_corr, day_corr_dir, median_corr, stdev_corr,
+                alpha_gain, beta, beta_corr, epsilon, epsilon_corr,
+                sigma, sigma_corr, omega, omega_corr,
+            )
 
         if plot_av:
             if len(self.corr_date) <= 20:

@@ -7,6 +7,7 @@ synthetic market whose correlations are exact by construction.
 
 from __future__ import annotations
 
+from math import isnan
 from statistics import mean
 
 import pytest
@@ -15,10 +16,16 @@ from conftest import EXPECTED_CORR, TRADING_DAYS
 from findata_corr import PackCorrelation
 
 
-def test_find_pack_correlation_identifies_pack_members(extractor):
+def _pack_for(extractor) -> PackCorrelation:
     pack = PackCorrelation(extractor.data, extractor.ticker_dates)
     pack.define_alpha("ALPHA")
     pack.find_pack_correlation(plot_av=False)
+
+    return pack
+
+
+def test_find_pack_correlation_identifies_pack_members(extractor):
+    pack = _pack_for(extractor)
 
     assert len(pack.corr_date) == len(TRADING_DAYS)
 
@@ -40,3 +47,27 @@ def test_find_pack_correlation_identifies_pack_members(extractor):
 
     distribution = pack.dist_date[(2022, 3, 21)]
     assert sorted(distribution) == pytest.approx(sorted(EXPECTED_CORR.values()))
+
+
+def test_correlation_aligns_on_timestamps_not_positions(gapped_extractor):
+    """A missing mid-day bar must drop that minute, not shift the rest.
+
+    GAPPED is exactly 2 * ALPHA on every bar it has, so its correlation is
+    1.0. Aligning by position instead scores it at roughly 0.68.
+    """
+    pack = _pack_for(gapped_extractor)
+
+    row = pack.corr_date.iloc[0]
+    assert row["Beta"] == "GAPPED"
+    assert row["Beta Corr"] == pytest.approx(1.0)
+
+    # the pack holds a single ticker, so there is no spread to report
+    assert isnan(row["Stdev Corr"])
+
+
+def test_days_without_usable_correlations_are_skipped(disjoint_extractor):
+    """One unusable day must not abort the whole run."""
+    pack = _pack_for(disjoint_extractor)
+
+    assert len(pack.corr_date) == 0
+    assert pack.dist_date[(2022, 3, 21)] == []
