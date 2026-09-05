@@ -16,29 +16,32 @@ from findata_extraction import FinDataExtract
 
 
 def test_pop_data_dict_parses_every_csv(extractor):
-    """Datetime strings must become real datetimes, sorted, with rows intact."""
+    """Bars must land on a sorted timestamp index, with rows intact."""
     assert set(extractor.data) == set(CLOSES)
 
     frame = extractor.data["ALPHA"]
     assert len(frame) == len(TRADING_DAYS) * BARS_PER_DAY
-    assert frame["Datetime"].iloc[0] == dt.datetime(2022, 3, 21, 9, 30)
-    assert frame["Datetime"].is_monotonic_increasing
+    assert frame.index[0] == dt.datetime(2022, 3, 21, 9, 30)
+    assert frame.index.is_monotonic_increasing
+    assert frame.index.is_unique
     assert list(frame["Close"][:BARS_PER_DAY]) == CLOSES["ALPHA"]
 
 
-def test_pop_ticker_dates_marks_day_boundaries(extractor):
-    """The [open, close) index pairs are the lookup table for everything else."""
-    assert extractor.ticker_dates["ALPHA"] == [
-        [3, 21, 2022, 0, 6],
-        [3, 22, 2022, 6, 12],
-        [3, 23, 2022, 12, 18],
+def test_a_day_slices_out_of_the_index(extractor):
+    """Selecting a day by label is what replaced the ticker_dates offsets."""
+    frame = extractor.data["ALPHA"]
+
+    assert list(extractor.trading_days()) == [
+        dt.datetime(2022, 3, 21),
+        dt.datetime(2022, 3, 22),
+        dt.datetime(2022, 3, 23),
     ]
 
-    frame = extractor.data["ALPHA"]
-    for month, day, year, open_index, close_index in extractor.ticker_dates["ALPHA"]:
-        day_slice = frame[open_index:close_index]
+    for day in TRADING_DAYS:
+        day_slice = frame.loc[str(day)]
         assert len(day_slice) == BARS_PER_DAY
-        assert set(day_slice["Datetime"].dt.date) == {dt.date(year, month, day)}
+        assert set(day_slice.index.date) == {day}
+        assert list(day_slice["Close"]) == CLOSES["ALPHA"]
 
 
 def test_slice_data_returns_requested_date_range(extractor):
@@ -46,8 +49,8 @@ def test_slice_data_returns_requested_date_range(extractor):
     sliced = extractor.slice_data("ALPHA", "2022-03-22", "2022-03-23")
 
     assert len(sliced) == 2 * BARS_PER_DAY
-    assert sliced["Datetime"].iloc[0] == dt.datetime(2022, 3, 22, 9, 30)
-    assert sliced["Datetime"].iloc[-1] == dt.datetime(2022, 3, 23, 9, 35)
+    assert sliced.index[0] == dt.datetime(2022, 3, 22, 9, 30)
+    assert sliced.index[-1] == dt.datetime(2022, 3, 23, 9, 35)
 
 
 def test_download_ticker_data_creates_then_appends(tmp_path):

@@ -60,11 +60,10 @@ def _write_ticker_csv(
 
 
 def _extractor_for(directory) -> FinDataExtract:
-    """Load a directory of ticker CSVs into `data` and `ticker_dates`."""
+    """Load a directory of ticker CSVs into `data`."""
     fde = FinDataExtract()
     fde.set_file_path(str(directory))
     fde.pop_data_dict()
-    fde.pop_ticker_dates()
 
     return fde
 
@@ -80,7 +79,7 @@ def market_dir(tmp_path):
 
 @pytest.fixture
 def extractor(market_dir):
-    """A FinDataExtract with `data` and `ticker_dates` built from `market_dir`."""
+    """A FinDataExtract with `data` built from `market_dir`."""
     return _extractor_for(market_dir)
 
 

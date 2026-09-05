@@ -16,6 +16,10 @@ import yfinance as yf
 class FinDataExtract:
     """Download, update, and slice intraday ticker data stored as CSV files.
 
+    Every frame in `data` is indexed by its bar timestamps, so a day is a
+    label slice (`frame.loc["2022-03-21"]`) and the days themselves come
+    from the index rather than from a separate table of row offsets.
+
     `downloader` is the callable used to fetch bars; it defaults to
     `yfinance.download` and can be replaced to source data elsewhere or to
     exercise the pipeline without network access.
@@ -24,11 +28,9 @@ class FinDataExtract:
     def __init__(
         self,
         data: dict[str, pd.DataFrame] | None = None,
-        ticker_dates: dict[str, list[list[int]]] | None = None,
         downloader: Callable[..., pd.DataFrame] = yf.download,
     ) -> None:
         self.data = data
-        self.ticker_dates = ticker_dates
         self.file_path = os.getcwd()
         self.watchlist: list[str] | None = None
         self.downloader = downloader
@@ -105,7 +107,7 @@ class FinDataExtract:
                 file_check = pd.read_csv(data_path, nrows=1)
 
                 # yfinance commonly drops the "Datetime" column name;
-                # restore it if missing
+                # restore it so the file can be reopened by that label
                 if "Datetime" not in file_check.columns:
                     file_check = pd.read_csv(data_path)
                     file_check.rename(
@@ -122,124 +124,49 @@ class FinDataExtract:
         print("All data downloaded")
 
     def pop_data_dict(self) -> None:
-        """Load all data files into `self.data`, keyed by ticker.
+        """Load every ticker CSV in `file_path` into `self.data`.
 
-        Converts the Datetime column from strings to real Timestamp
-        objects. Only rows more recent than the last processed index are
-        added.
+        Each frame is indexed by its bar timestamps, sorted, with repeated
+        timestamps dropped. Files are read in full on every call, so the
+        CSVs on disk remain the single source of truth.
         """
         if self.data is None:
             self.data = {}
-        if self.ticker_dates is None:
-            self.ticker_dates = {}
 
-        # obtain new file list to include any new files/tickers
-        file_list = [file for file in os.scandir(self.file_path) if file.is_file()]
-
-        for file in file_list:
-            ticker = file.name.split("-")[0]
-            new_data_path = os.path.join(self.file_path, file.name)
-            print(ticker)
-
-            # determine the most recently updated data
-            if ticker in self.ticker_dates:
-                recent_index = self.ticker_dates[ticker][-1][-1]
-            else:
-                recent_index = 0
-
-            new_data = pd.read_csv(new_data_path)[recent_index:]
-
-            if len(new_data) < 2:
+        for file in os.scandir(self.file_path):
+            if not file.is_file():
                 continue
 
-            if ticker in self.data:
-                if "Datetime" not in self.data[ticker].columns:
-                    new_data.rename(
-                        columns={"Unnamed: 0": "Datetime"}, inplace=True
-                    )
-            elif "Datetime" not in new_data.columns:
-                new_data.rename(columns={"Unnamed: 0": "Datetime"}, inplace=True)
-
-            # convert datetime strings to proper datetime objects
-            new_data["Datetime"] = new_data["Datetime"].apply(
-                lambda x: dt.datetime.strptime(x[:16], "%Y-%m-%d %H:%M")
-            )
-            new_data = new_data.sort_values(by="Datetime", ignore_index=True)
-            new_data = new_data.drop_duplicates(subset=["Datetime"], keep="first")
-            new_data = new_data.reset_index(drop=True)
-
-            if ticker in self.data:
-                self.data[ticker] = pd.concat([self.data[ticker], new_data])
-            else:
-                self.data[ticker] = new_data
-
-    def pop_ticker_dates(self) -> None:
-        """Populate `self.ticker_dates` with each day's row-index bounds.
-
-        For every ticker, builds a list of [month, day, year, open_index,
-        close_index] entries marking where each trading day begins and
-        ends (market open 9:30am and close 4:00pm) within that ticker's
-        dataframe.
-        """
-        if self.data is None:
-            print(
-                "\nNo data supplied: please pass a dictionary of dataframes "
-                "as an argument or use the pop_data_dict() function"
-            )
-            return
-
-        if self.ticker_dates is None:
-            self.ticker_dates = {}
-
-        # obtain new file list to include any new files/tickers
-        file_list = [file for file in os.scandir(self.file_path) if file.is_file()]
-
-        for file in file_list:
             ticker = file.name.split("-")[0]
             print(ticker)
 
-            # determine the most recently updated data
-            if ticker in self.ticker_dates:
-                recent_index = self.ticker_dates[ticker][-1][-1]
-            else:
-                recent_index = 0
+            frame = pd.read_csv(os.path.join(self.file_path, file.name))
 
-            new_data = self.data[ticker][recent_index:]
+            # yfinance commonly drops the "Datetime" column name
+            if "Datetime" not in frame.columns:
+                frame = frame.rename(columns={"Unnamed: 0": "Datetime"})
 
-            if len(new_data) < 2:
+            # the leading 16 characters are "YYYY-MM-DD HH:MM"; taking them
+            # discards any timezone offset, keeping every bar naive and
+            # directly comparable across tickers
+            frame["Datetime"] = pd.to_datetime(
+                frame["Datetime"].str[:16], format="%Y-%m-%d %H:%M"
+            )
+
+            frame = frame.set_index("Datetime").sort_index()
+            frame = frame[~frame.index.duplicated(keep="first")]
+
+            if len(frame) < 2:
                 continue
 
-            begin_index = new_data.index[0]
-            end_index = new_data.index[-1]
-            dates = []
-            month = new_data["Datetime"][begin_index].month
-            day = new_data["Datetime"][begin_index].day
-            year = new_data["Datetime"][begin_index].year
-            start = begin_index
-            num_days = 0
-            dates.append([month, day, year, start])
+            self.data[ticker] = frame
 
-            # iterate through dataframe and separate into different days
-            for i in range(begin_index + 1, end_index):
-                if (
-                    new_data["Datetime"][i].date()
-                    != new_data["Datetime"][i - 1].date()
-                ):
-                    start = i
-                    month = new_data["Datetime"][i].month
-                    day = new_data["Datetime"][i].day
-                    year = new_data["Datetime"][i].year
-                    dates.append([month, day, year, start])
-                    dates[num_days].append(i)
-                    num_days += 1
+    def trading_days(self, ticker: str | None = None) -> pd.DatetimeIndex:
+        """Return the distinct days a ticker has data for."""
+        if ticker is None:
+            ticker = next(iter(self.data))
 
-            # adding final index value for final day
-            dates[-1].append(end_index + 1)
-
-            if ticker in self.ticker_dates:
-                self.ticker_dates[ticker].extend(dates)
-            else:
-                self.ticker_dates[ticker] = dates
+        return self.data[ticker].index.normalize().unique()
 
     def slice_data(
         self,
@@ -247,36 +174,20 @@ class FinDataExtract:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame | None:
-        """Return the data slice between two dates (inclusive) for a ticker."""
+        """Return the rows between two dates, both days included.
+
+        Dates are "YYYY-MM-DD" strings; either end may be omitted to run to
+        the start or end of the available data.
+        """
         if ticker is None:
             ticker = next(iter(self.data))
         if ticker not in self.data:
             print(f"{ticker} not found in data")
             return None
 
-        if start_date is None:
-            start_index = self.ticker_dates[ticker][0][3]
-        else:
-            year, month, day = start_date.split("-")
-            start_key = [int(month), int(day), int(year)]
-            start_index = next(
-                x[3] for x in self.ticker_dates[ticker] if x[:3] == start_key
-            )
-
-        if end_date is None:
-            end_index = self.ticker_dates[ticker][-1][4]
-        else:
-            year, month, day = end_date.split("-")
-            end_key = [int(month), int(day), int(year)]
-            end_index = next(
-                x[4] for x in self.ticker_dates[ticker] if x[:3] == end_key
-            )
-
-        data_slice = self.data[ticker][start_index:end_index]
-        data_slice = data_slice.reset_index(drop=True)
         print(f"Data slice for {ticker}")
 
-        return data_slice
+        return self.data[ticker].loc[start_date:end_date]
 
     def plot_data(
         self,
@@ -295,7 +206,7 @@ class FinDataExtract:
         series = self.slice_data(ticker, start_date, end_date)
 
         plt.plot(series[plot_series], label=ticker)
-        plt.xlabel("Index (min)")
+        plt.xlabel("Time")
         plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
         plt.legend()
         print(f"{plot_series}-data plotted for {ticker}")
@@ -303,17 +214,13 @@ class FinDataExtract:
     def data_by_date(
         self, ticker: str | None = None
     ) -> dict[dt.date, pd.DataFrame]:
-        """Return a dictionary of date -> single-day dataframe for a ticker."""
+        """Return a dictionary of date -> that day's rows for a ticker."""
         if ticker is None:
             ticker = next(iter(self.data))
 
-        data_by_day = {}
+        frame = self.data[ticker]
 
-        for month, day, year, start_index, end_index in self.ticker_dates[ticker]:
-            day_data = self.data[ticker][start_index:end_index]
-            data_by_day[dt.date(year=year, month=month, day=day)] = day_data
-
-        return data_by_day
+        return {day: group for day, group in frame.groupby(frame.index.date)}
 
     def downcast_data(self, data: dict[str, pd.DataFrame] | None = None) -> None:
         """Reduce memory usage by downcasting price columns to float32."""
@@ -338,17 +245,17 @@ class FinDataExtract:
         tuples for days with incomplete data (populated only when
         `minute_check` is True).
         """
-        first_ticker = next(iter(self.data))
+        first_frame = self.data[next(iter(self.data))]
 
         if start_date is None:
-            start = self.data[first_ticker]["Datetime"][0].date()
+            start = first_frame.index[0].date()
         else:
-            start = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+            start = dt.date.fromisoformat(start_date)
 
         if end_date is None:
-            end = self.data[first_ticker]["Datetime"].iloc[-1].date()
+            end = first_frame.index[-1].date()
         else:
-            end = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+            end = dt.date.fromisoformat(end_date)
 
         # Not true market days, only a list of weekdays in the date range
         market_days = []
@@ -360,44 +267,28 @@ class FinDataExtract:
         missed_days_ticker = {}
         missed_mins_ticker = {}
 
-        for ticker, ticker_data in self.data.items():
-            day_open = {
-                ticker_data["Datetime"][entry[3]].date(): entry
-                for entry in self.ticker_dates[ticker]
-            }
+        for ticker, frame in self.data.items():
+            bars_per_day = frame.groupby(frame.index.date).size()
 
-            missed_days = list(set(market_days) ^ set(day_open.keys()))
+            missed_days = list(set(market_days) ^ set(bars_per_day.index))
             if missed_days:
                 missed_days_ticker[ticker] = missed_days
 
             if minute_check:
-                missing_minutes = []
-                for date, day in day_open.items():
-                    len_day_slice = len(ticker_data[day[3] : day[4]])
-                    if len_day_slice < 389:
-                        missing_minutes.append((date, 389 - len_day_slice))
-                missed_mins_ticker[ticker] = missing_minutes
+                missed_mins_ticker[ticker] = [
+                    (day, 389 - bars)
+                    for day, bars in bars_per_day.items()
+                    if bars < 389
+                ]
 
         return missed_days_ticker, missed_mins_ticker
 
-    def load_pickles(
-        self, pickle_path: str, data_name: str, ticker_dates_name: str
-    ) -> None:
-        """Load previously pickled `data` and `ticker_dates` from disk."""
+    def load_pickle(self, pickle_path: str, data_name: str) -> None:
+        """Load a previously pickled `data` dictionary from disk."""
         with open(os.path.join(pickle_path, data_name), "rb") as file_in:
             self.data = pickle.load(file_in)
 
-        with open(os.path.join(pickle_path, ticker_dates_name), "rb") as file_in:
-            self.ticker_dates = pickle.load(file_in)
-
-    def save_pickles(
-        self, pickle_path: str, data_name: str, ticker_dates_name: str
-    ) -> None:
-        """Pickle `data` and `ticker_dates` to disk for future use."""
+    def save_pickle(self, pickle_path: str, data_name: str) -> None:
+        """Pickle `data` to disk for future use."""
         with open(os.path.join(pickle_path, data_name), "wb") as file_out:
             pickle.dump(self.data, file_out)
-
-        with open(
-            os.path.join(pickle_path, ticker_dates_name), "wb"
-        ) as file_out:
-            pickle.dump(self.ticker_dates, file_out)

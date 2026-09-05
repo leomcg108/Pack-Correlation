@@ -44,7 +44,7 @@ So therefore the other members of the pack can be defined as follows:
 
 ## Tutorial and Examples
 
-`PackCorrelation` uses a somewhat idiosyncratic data structure that makes it easy and quick to calculate correlations for each day for a stock to the alpha. The format uses `data` as a dictionary of dataframes with the stock tickers as keys. The `ticker_dates` dictionary is essentially a list of indices that point to locations in a ticker’s dataframe that correspond to the open and closing rows for each day. This allows for rapid lookups of individual price data or slicing of days in the case of Pack Correlation. The speed improvement comes at a cost of only the minor space requirement of `ticker_dates`. More details can be found in the complementary repository [here](https://github.com/leomcg108/FinData-Extraction). The `data` & `ticker_dates` data structure can be quickly implemented given csv files for each stock. The `FinDataExtract` class contains the `pop_data_dict` method which will generate the relevant dictionary and `pop_ticker_dates` will produce the `ticker_dates` structure.
+`PackCorrelation` takes `data`, a dictionary of dataframes keyed by ticker, where each dataframe is indexed by its bar timestamps. A single day is then a label slice — `data["SPY"].loc["2022-04-01"]` — and the trading days themselves come straight from the index, so no separate table of row offsets is needed. The `FinDataExtract` class builds this structure from a directory of csv files with its `pop_data_dict` method. More details can be found in the complementary repository [here](https://github.com/leomcg108/FinData-Extraction).
 
 ```python
 from findata_extraction import FinDataExtract
@@ -52,7 +52,7 @@ from findata_extraction import FinDataExtract
 # Create instance of class
 >>> fde = FinDataExtract()
 
-# Define path at which to download data and/or from which to generate data and ticker_dates dictionaries
+# Define path at which to download data and/or from which to generate the data dictionary
 >>> fde.set_file_path(".//Watchlist//Test")
 
 # create a list of tickers from a given csv file e.g. members of S&P 500 index
@@ -65,43 +65,41 @@ from findata_extraction import FinDataExtract
 >>> fde.pop_data_dict()
 >>> data = fde.data
 
-# Create a dictionary of lists of dates and open and close indices as values and stock ticker as corresponding key
->>> fde.pop_ticker_dates()
->>> ticker_dates = fde.ticker_dates
+# The days a ticker holds data for come from the index
+>>> fde.trading_days("SPY")[-3:]
+DatetimeIndex(['2022-03-30', '2022-03-31', '2022-04-01'], dtype='datetime64[ns]')
 
-# Now we can easily access specific days of data for each ticker
-# Access the opening info for most recent day for SPY
->>> open_index = ticker_dates["SPY"][-1][3]
->>> data["SPY"].loc[open_index]
+# A whole day is a label slice
+>>> day = data["SPY"].loc["2022-04-01"]
 
-Datetime     2022-04-01 09:30:00
+# Access the opening info for the most recent day for SPY
+>>> day.iloc[0]
+
 Open                  453.309998
 High                  453.339996
 Low                   452.799988
 Close                 453.070007
 Adj Close             453.070007
 Volume                 2290723.0
-Name: 188977, dtype: object
+Name: 2022-04-01 09:30:00, dtype: float64
 
 # and the closing info for the most recent day
->>> close_index = ticker_dates["SPY"][-1][4]
->>> data["SPY"].loc[close_index]
+>>> day.iloc[-1]
 
-Datetime     2022-04-01 15:59:00
 Open                  453.140015
 High                  453.170013
 Low                   452.779999
 Close                 452.890015
 Adj Close             452.890015
 Volume                 3033426.0
-Name: 189366, dtype: object
+Name: 2022-04-01 15:59:00, dtype: float64
 ```
 
 Now that we have the correct data structures we can easily calculate the pack correlation for each day under consideration.
 
 ```python
-# Create instance of the PackCorrelation class passing previously defined data and ticker_dates
->>> pack = PackCorrelation(data, ticker_dates)
+# Create instance of the PackCorrelation class passing the previously defined data
+>>> pack = PackCorrelation(data)
 
 # Define alpha against which correlations for all other members of pack will be calculated
 >>> pack.define_alpha("SPY")
@@ -114,13 +112,12 @@ Contains a dictionary of 560 dataframes with 252 days and alpha as SPY
 ```
 ![image](https://user-images.githubusercontent.com/102587512/161964221-5b996a92-9f48-47ff-a7b4-3a58b14ce14f.png)
 
-Here we can see the overall pack correlation as a function of time. The `find_pack_correlation` method will create a dataframe `pack.corr_date` containing the average, median and standard deviation of the entire pack correlation, the directional pack correlation (average pack correlation modified by alpha gain or loss) plus the names and correlations of the pack members (Beta, Epsilon, Sigma, Omega) for each day under consideration.
+Here we can see the overall pack correlation as a function of time. The `find_pack_correlation` method will create a dataframe `pack.corr_date`, indexed by trading day, containing the average, median and standard deviation of the entire pack correlation, the directional pack correlation (average pack correlation modified by alpha gain or loss) plus the names and correlations of the pack members (Beta, Epsilon, Sigma, Omega) for each day under consideration.
 
 We can also easily pull out a single day and look at it in more depth. 
 
 ```python
->>> pack.corr_date.iloc[10]
-Day             [4, 22, 2021]
+>>> pack.corr_date.loc["2021-04-22"]
 Av Corr              0.626548
 Dir Corr            -0.626548
 Median Corr          0.749294
@@ -134,12 +131,12 @@ Sigma                     CVS
 Sigma Corr          -0.000276
 Omega                    UVXY
 Omega Corr          -0.976964
-Name: 10, dtype: object
+Name: 2021-04-22 00:00:00, dtype: object
 
 # can plot each of the pack members for a given date with prices normalized so as to be easily #compared
 >>> pack.plot_day_corr(date="2022-02-25", plot_alpha=True, plot_beta=True, plot_omega=True)
 
-Selected day: [2, 25, 2022]
+Selected day: 2022-02-25
 Average day correlation: 0.77
 
 Alpha: SPY
@@ -154,7 +151,7 @@ From this plot it’s clear to see that the Beta is following the Alpha closely 
 # plot a histogram to show the distribution of correlations for a given day
 >>> pack.plot_hist_corr("2022-04-01", bins=50)
 
-Selected day: (2022, 4, 1)
+Selected day: 2022-04-01
 
 Mean: 0.41
 Median: 0.47
@@ -168,13 +165,13 @@ Mode: 0.56
 >>> pack.plot_hist_corr("2022-02-25", bins=50, alpha=0.5)
 >>> pack.plot_hist_corr("2021-11-02", bins=50, alpha=0.5)
 
-Selected day: (2022, 2, 25)
+Selected day: 2022-02-25
 
 Mean: 0.77
 Median: 0.88
 Mode: 0.91
 
-Selected day: (2021, 11, 2)
+Selected day: 2021-11-02
 
 Mean: 0.07
 Median: 0.08
@@ -213,7 +210,6 @@ Take the above example, 560 stocks for the previous year of 252 trading days. In
 * Allow for pack correlation calculation for different granularity of data e.g. 5min, 1 hour, 1 day candles
 * Add error estimation
 * Provide features for cryptocurrencies
-* Add automatic ticker_dates calculator for given data
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.

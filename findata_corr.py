@@ -5,7 +5,7 @@ https://github.com/leomcg108/Pack-Correlation/
 
 from __future__ import annotations
 
-from math import isnan
+import datetime as dt
 from statistics import mean, median, median_high, stdev
 
 import matplotlib.pyplot as plt
@@ -13,32 +13,46 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+CORR_COLUMNS = [
+    "Av Corr",
+    "Dir Corr",
+    "Median Corr",
+    "Stdev Corr",
+    "Alpha Gain",
+    "Beta",
+    "Beta Corr",
+    "Epsilon",
+    "Epsilon Corr",
+    "Sigma",
+    "Sigma Corr",
+    "Omega",
+    "Omega Corr",
+]
+
 
 class PackCorrelation:
     """Correlate a basket of assets against a target asset (alpha).
 
-    Builds a dataframe of the daily average correlation for the basket,
-    the max (beta), median (epsilon), least correlated (sigma), and most
-    anti-correlated (omega) assets. These quantities define the "pack".
+    Builds `corr_date`, a dataframe indexed by trading day holding the
+    basket's average correlation together with the max (beta), median
+    (epsilon), least correlated (sigma), and most anti-correlated (omega)
+    assets. These quantities define the "pack".
 
-    Also builds the distribution of correlations for each day as a
-    dictionary of lists.
+    Also builds `dist_date`, the full distribution of correlations for each
+    day, keyed by date.
+
+    `data` maps a ticker to a dataframe indexed by bar timestamp, as
+    produced by `FinDataExtract.pop_data_dict`.
     """
 
-    def __init__(
-        self,
-        data: dict[str, pd.DataFrame],
-        ticker_dates: dict[str, list[list[int]]],
-    ) -> None:
+    def __init__(self, data: dict[str, pd.DataFrame]) -> None:
         self.data = data
-        self.ticker_dates = ticker_dates
         self.alpha = next(iter(data))
 
     def __repr__(self) -> str:
         return (
             f"Contains a dictionary of {len(self.data)} dataframes with "
-            f"{len(self.ticker_dates[self.alpha])} days and alpha as "
-            f"{self.alpha}"
+            f"{len(self.trading_days())} days and alpha as {self.alpha}"
         )
 
     def define_alpha(self, alpha: str) -> None:
@@ -47,17 +61,53 @@ class PackCorrelation:
         else:
             print(f"{alpha} not in data dictionary")
 
+    def trading_days(self) -> pd.DatetimeIndex:
+        """Return the distinct days the alpha has data for."""
+        return self.data[self.alpha].index.normalize().unique()
+
     @staticmethod
-    def _close_by_minute(day_slice: pd.DataFrame) -> pd.Series:
-        """Return a day's Close prices indexed by timestamp.
+    def _correlate_block(block: pd.DataFrame, alpha: str) -> dict[str, float]:
+        """Correlate every column of one day's closes against the alpha.
 
-        Correlations are computed against this index so that two tickers are
-        compared minute-for-minute. Repeated timestamps are dropped, since a
-        duplicated index cannot be aligned.
+        Each pairing uses only the minutes where both tickers traded, so a
+        member missing bars loses those minutes rather than shifting its
+        remaining prices against the alpha. Members covering too little of
+        the day, or whose correlation is undefined, are left out.
         """
-        series = day_slice.set_index("Datetime")["Close"]
+        block = block[block[alpha].notna()]
+        alpha_closes = block[alpha]
+        members = block.drop(columns=alpha)
+        len_day = len(alpha_closes)
 
-        return series[~series.index.duplicated(keep="first")]
+        # a member has to cover most of the alpha's day to be comparable
+        overlap = members.notna().sum()
+        members = members.loc[:, (overlap > len_day - 10) & (overlap > 1)]
+
+        if members.empty:
+            return {}
+
+        values = members.to_numpy(dtype=float)
+        alpha_values = alpha_closes.to_numpy(dtype=float)[:, None]
+        valid = ~np.isnan(values)
+
+        # Pearson correlation per column, over each column's own valid rows
+        with np.errstate(invalid="ignore", divide="ignore"):
+            counts = valid.sum(axis=0)
+            mean_alpha = np.where(valid, alpha_values, 0.0).sum(axis=0) / counts
+            mean_member = np.where(valid, values, 0.0).sum(axis=0) / counts
+
+            dev_alpha = np.where(valid, alpha_values - mean_alpha, 0.0)
+            dev_member = np.where(valid, values - mean_member, 0.0)
+
+            correlations = (dev_alpha * dev_member).sum(axis=0) / np.sqrt(
+                (dev_alpha**2).sum(axis=0) * (dev_member**2).sum(axis=0)
+            )
+
+        return {
+            ticker: float(corr)
+            for ticker, corr in zip(members.columns, correlations)
+            if np.isfinite(corr)
+        }
 
     def find_pack_correlation(
         self,
@@ -68,122 +118,104 @@ class PackCorrelation:
         """Calculate pack correlation and per-day correlation distribution.
 
         For each day in the range given by `start_index` and `end_index`,
-        computes the average/median/stdev correlation of every other
-        ticker to `self.alpha`, along with the most (beta), median
-        (epsilon), least (sigma), and most anti-correlated (omega)
-        tickers. Results are stored in `self.corr_date`; the per-day
-        correlation distributions are stored in `self.dist_date`.
+        computes the average/median/stdev correlation of every other ticker
+        to `self.alpha`, along with the most (beta), median (epsilon),
+        least (sigma), and most anti-correlated (omega) tickers. Days on
+        which nothing correlated are left out of `corr_date`.
         """
+        # every ticker's closes on one shared time grid, so a day's
+        # correlations are a single pass over a (minutes x tickers) block
+        closes = pd.DataFrame(
+            {ticker: frame["Close"] for ticker, frame in self.data.items()}
+        ).sort_index()
+
+        alpha_frame = self.data[self.alpha]
         self.dist_date = {}
-        alpha_data = self.data[self.alpha]
+        rows, index = [], []
 
-        self.corr_date = pd.DataFrame(
-            columns=[
-                "Day", "Av Corr", "Dir Corr", "Median Corr", "Stdev Corr",
-                "Alpha Gain", "Beta", "Beta Corr", "Epsilon", "Epsilon Corr",
-                "Sigma", "Sigma Corr", "Omega", "Omega Corr",
-            ]
-        )
+        for day in self.trading_days()[start_index:end_index]:
+            key = str(day.date())
 
-        for index_num, date in enumerate(
-            self.ticker_dates[self.alpha][start_index:end_index]
-        ):
-            ticker_corr = {}
-            day = date[:3]
-
-            alpha_days = [item[:3] for item in self.ticker_dates[self.alpha]]
-            alpha_day = alpha_days.index(day)
-            alpha_open = self.ticker_dates[self.alpha][alpha_day][3]
-            alpha_close = self.ticker_dates[self.alpha][alpha_day][4] - 1
-            alpha_slice = alpha_data[alpha_open:alpha_close]
-            alpha_gain = (
-                alpha_data["Close"][alpha_close] / alpha_data["Open"][alpha_open]
-            )
-
-            alpha_series = self._close_by_minute(alpha_slice)
-            len_day = len(alpha_series)
-
-            direction = 1 if alpha_gain > 1 else -1
-
-            for ticker in self.data.keys():
-                if ticker == self.alpha:  # avoids self correlation for alpha
-                    continue
-
-                all_days = [item[:3] for item in self.ticker_dates[ticker]]
-                if day not in all_days:
-                    continue
-
-                index_day = all_days.index(day)
-                index_open = self.ticker_dates[ticker][index_day][3]
-                index_close = self.ticker_dates[ticker][index_day][4] - 1
-                day_slice = self.data[ticker][index_open:index_close]
-                day_series = self._close_by_minute(day_slice)
-
-                # check that enough of the day lines up with the alpha's bars
-                overlap = alpha_series.index.intersection(day_series.index)
-                if len(overlap) > len_day - 10:
-                    corr = alpha_series.corr(day_series)
-                    if not isnan(corr):
-                        ticker_corr[ticker] = corr
-
+            # the day's final bar sets the alpha's gain but is not correlated
+            ticker_corr = self._correlate_block(closes.loc[key].iloc[:-1], self.alpha)
             corr_list = list(ticker_corr.values())
-            self.dist_date[(day[2], day[0], day[1])] = corr_list
+            self.dist_date[day.date()] = corr_list
 
             # nothing correlated on this day, so there is no pack to describe
             if not ticker_corr:
                 continue
 
+            alpha_day = alpha_frame.loc[key]
+            alpha_gain = alpha_day["Close"].iloc[-1] / alpha_day["Open"].iloc[0]
+            direction = 1 if alpha_gain > 1 else -1
+
             day_corr = mean(corr_list)
             median_corr = median_high(corr_list)
-            stdev_corr = stdev(corr_list) if len(corr_list) > 1 else float("nan")
 
             beta = max(ticker_corr, key=ticker_corr.get)
-            beta_corr = ticker_corr[beta]
-
             epsilon = next(k for k, v in ticker_corr.items() if v == median_corr)
-            epsilon_corr = ticker_corr[epsilon]
-
-            abs_ticker_corr = {
-                key: abs(val) for key, val in ticker_corr.items() if val != 0
-            }
-            if not abs_ticker_corr:  # every correlation was exactly zero
-                abs_ticker_corr = dict.fromkeys(ticker_corr, 0.0)
-            sigma = min(abs_ticker_corr, key=abs_ticker_corr.get)
-            sigma_corr = ticker_corr[sigma]
-
             omega = min(ticker_corr, key=ticker_corr.get)
-            omega_corr = ticker_corr[omega]
 
-            day_corr_dir = day_corr * direction if day_corr > 0 else 0
+            magnitudes = {t: abs(v) for t, v in ticker_corr.items() if v != 0}
+            if not magnitudes:  # every correlation was exactly zero
+                magnitudes = dict.fromkeys(ticker_corr, 0.0)
+            sigma = min(magnitudes, key=magnitudes.get)
 
-            self.corr_date.loc[index_num] = (
-                day, day_corr, day_corr_dir, median_corr, stdev_corr,
-                alpha_gain, beta, beta_corr, epsilon, epsilon_corr,
-                sigma, sigma_corr, omega, omega_corr,
+            index.append(day)
+            rows.append(
+                {
+                    "Av Corr": day_corr,
+                    "Dir Corr": day_corr * direction if day_corr > 0 else 0,
+                    "Median Corr": median_corr,
+                    "Stdev Corr": (
+                        stdev(corr_list) if len(corr_list) > 1 else float("nan")
+                    ),
+                    "Alpha Gain": alpha_gain,
+                    "Beta": beta,
+                    "Beta Corr": ticker_corr[beta],
+                    "Epsilon": epsilon,
+                    "Epsilon Corr": ticker_corr[epsilon],
+                    "Sigma": sigma,
+                    "Sigma Corr": ticker_corr[sigma],
+                    "Omega": omega,
+                    "Omega Corr": ticker_corr[omega],
+                }
             )
+
+        self.corr_date = pd.DataFrame(
+            rows, index=pd.DatetimeIndex(index, name="Day"), columns=CORR_COLUMNS
+        )
 
         if plot_av:
-            if len(self.corr_date) <= 20:
-                roll = 2
-            elif len(self.corr_date) <= 100:
-                roll = 3
-            elif len(self.corr_date) <= 300:
-                roll = 5
-            else:
-                roll = 10
+            self._plot_average()
 
-            plt.plot(
-                self.corr_date["Av Corr"], color="tab:blue", alpha=0.5,
-                linewidth=2, label="Av Corr",
-            )
-            plt.plot(
-                self.corr_date["Av Corr"].rolling(roll).mean(),
-                color="tab:orange", linewidth=3,
-                label=f"Rolling({roll}) Av Corr",
-            )
-            plt.xlabel("Days")
-            plt.ylabel("Correlation")
-            plt.legend()
+    def _plot_average(self) -> None:
+        """Plot the pack's average correlation under a rolling mean."""
+        if len(self.corr_date) <= 20:
+            roll = 2
+        elif len(self.corr_date) <= 100:
+            roll = 3
+        elif len(self.corr_date) <= 300:
+            roll = 5
+        else:
+            roll = 10
+
+        plt.plot(
+            self.corr_date["Av Corr"],
+            color="tab:blue",
+            alpha=0.5,
+            linewidth=2,
+            label="Av Corr",
+        )
+        plt.plot(
+            self.corr_date["Av Corr"].rolling(roll).mean(),
+            color="tab:orange",
+            linewidth=3,
+            label=f"Rolling({roll}) Av Corr",
+        )
+        plt.xlabel("Days")
+        plt.ylabel("Correlation")
+        plt.legend()
 
     def plot_day_corr(
         self,
@@ -200,70 +232,42 @@ class PackCorrelation:
         (computing it for just this day if not yet available). By default
         only alpha is plotted; set the other flags to add more series.
         """
-        if not date:
-            date = self.ticker_dates[self.alpha][-1][:3]
-        else:
-            year, month, day = date.split("-")
-            date = [int(month), int(day), int(year)]
+        days = self.trading_days()
+        day = days[-1] if not date else pd.Timestamp(date)
 
-        if not hasattr(self, "corr_date") or date not in list(
-            self.corr_date["Day"]
-        ):
-            date_index = next(
-                i
-                for i, x in enumerate(self.ticker_dates[self.alpha])
-                if x[:3] == date
-            )
-            self.find_pack_correlation(
-                start_index=date_index, end_index=date_index + 1, plot_av=False
-            )
+        if not hasattr(self, "corr_date") or day not in self.corr_date.index:
+            position = days.get_loc(day)
+            self.find_pack_correlation(position, position + 1, plot_av=False)
 
-        all_days = list(self.corr_date["Day"])
-        date_index = all_days.index(date)
+        if day not in self.corr_date.index:
+            return f"{day.date()} has no valid correlation data calculated"
 
-        if self.corr_date["Av Corr"].iloc[date_index] == 0:
-            return f"{date} has no valid correlation data calculated"
+        row = self.corr_date.loc[day]
 
-        alpha = self.alpha
-        beta = self.corr_date["Beta"].iloc[date_index]
-        epsilon = self.corr_date["Epsilon"].iloc[date_index]
-        sigma = self.corr_date["Sigma"].iloc[date_index]
-        omega = self.corr_date["Omega"].iloc[date_index]
-
-        av_val = self.corr_date["Av Corr"].iloc[date_index]
-        beta_val = self.corr_date["Beta Corr"].iloc[date_index]
-        epsilon_val = self.corr_date["Epsilon Corr"].iloc[date_index]
-        sigma_val = self.corr_date["Sigma Corr"].iloc[date_index]
-        omega_val = self.corr_date["Omega Corr"].iloc[date_index]
-
-        print(f"\nSelected day: {date}")
-        print(f"Average day correlation: {av_val:.2f}\n")
+        print(f"\nSelected day: {day.date()}")
+        print(f"Average day correlation: {row['Av Corr']:.2f}\n")
 
         plot_list = []
         if plot_alpha:
-            plot_list.append(alpha)
-            print(f"Alpha: {alpha}")
-        if plot_beta:
-            plot_list.append(beta)
-            print(f"Beta: {beta} ({beta_val:.2f})")
-        if plot_epsilon:
-            plot_list.append(epsilon)
-            print(f"Epsilon: {epsilon} ({epsilon_val:.2f})")
-        if plot_sigma:
-            plot_list.append(sigma)
-            print(f"Sigma: {sigma} ({sigma_val:.2f})")
-        if plot_omega:
-            plot_list.append(omega)
-            print(f"Omega: {omega} ({omega_val:.2f})")
+            plot_list.append(self.alpha)
+            print(f"Alpha: {self.alpha}")
 
+        for role, wanted in (
+            ("Beta", plot_beta),
+            ("Epsilon", plot_epsilon),
+            ("Sigma", plot_sigma),
+            ("Omega", plot_omega),
+        ):
+            if wanted:
+                plot_list.append(row[role])
+                print(f"{role}: {row[role]} ({row[f'{role} Corr']:.2f})")
+
+        key = str(day.date())
         for ticker in plot_list:
-            date_info = next(x for x in self.ticker_dates[ticker] if x[:3] == date)
-            slice_start, slice_end = date_info[3], date_info[4] - 1
-            close = self.data[ticker][slice_start:slice_end]["Close"]
+            close = self.data[ticker].loc[key, "Close"]
             norm_close = (close - close.min()) / (close.max() - close.min())
-            norm_close = norm_close.reset_index(drop=True)
 
-            plt.plot(norm_close, label=ticker)
+            plt.plot(norm_close.reset_index(drop=True), label=ticker)
             plt.xlabel("Time after market open (min)")
             plt.ylabel("Normalized Price")
             plt.legend()
@@ -275,24 +279,21 @@ class PackCorrelation:
     ) -> None:
         """Plot a histogram of the correlation distribution for one day."""
         if date is None:
-            date = list(self.dist_date.keys())[-1]
+            day = list(self.dist_date)[-1]
         else:
-            year, month, day = date.split("-")
-            date = (int(year), int(month), int(day))
+            day = dt.date.fromisoformat(date)
 
-        dists = self.dist_date[date]
+        dists = self.dist_date[day]
         counts, bin_edges, _ = plt.hist(dists, bins=bins, alpha=alpha)
         plt.xlim(left=-1, right=1)
         plt.xlabel("Correlation")
         plt.ylabel("Frequency")
 
-        hist_mean = mean(dists)
-        hist_median = median(dists)
         hist_mode = bin_edges[list(counts).index(max(counts))]
 
-        print(f"\nSelected day: {date}\n")
-        print(f"Mean: {round(hist_mean, 2)}")
-        print(f"Median: {round(hist_median, 2)}")
+        print(f"\nSelected day: {day}\n")
+        print(f"Mean: {round(mean(dists), 2)}")
+        print(f"Median: {round(median(dists), 2)}")
         print(f"Mode: {round(hist_mode, 2)}")
 
     def plot_heatmap(
@@ -306,10 +307,9 @@ class PackCorrelation:
         binning = [x / 1000 for x in range(-1000, 1000, range_bins)]
         heatmap_data = pd.DataFrame(index=binning)
 
-        for date in list(self.dist_date.keys())[start_index:end_index]:
-            counts = np.histogram(self.dist_date[date], binning)[0]
-            counts = np.append(counts, 0)
-            heatmap_data[date] = counts.tolist()
+        for day in list(self.dist_date)[start_index:end_index]:
+            counts = np.histogram(self.dist_date[day], binning)[0]
+            heatmap_data[day] = np.append(counts, 0).tolist()
 
         heatmap = sns.heatmap(
             heatmap_data,
@@ -327,37 +327,16 @@ class PackCorrelation:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame | None:
-        """Return the data slice between two dates for the given ticker."""
+        """Return the rows between two dates, both days included."""
         if ticker is None:
             ticker = self.alpha
         if ticker not in self.data:
             print(f"{ticker} not found in data")
             return None
 
-        if start_date is None:
-            start_index = self.ticker_dates[ticker][0][3]
-        else:
-            year, month, day = start_date.split("-")
-            start_key = [int(month), int(day), int(year)]
-            start_index = next(
-                x[3] for x in self.ticker_dates[ticker] if x[:3] == start_key
-            )
-
-        if end_date is None:
-            end_index = self.ticker_dates[ticker][-1][4] - 1
-        else:
-            year, month, day = end_date.split("-")
-            end_key = [int(month), int(day), int(year)]
-            end_index = next(
-                x[4] - 1 for x in self.ticker_dates[ticker] if x[:3] == end_key
-            )
-
-        data_slice = self.data[ticker][start_index:end_index]
-        data_slice = data_slice.reset_index(drop=True)
-
         print(f"Data slice for {ticker}")
 
-        return data_slice
+        return self.data[ticker].loc[start_date:end_date]
 
     def plot_data(
         self,
@@ -376,7 +355,7 @@ class PackCorrelation:
         series = self.slice_data(ticker, start_time, end_time)
 
         plt.plot(series[plot_series], label=ticker)
-        plt.xlabel("Index (min)")
+        plt.xlabel("Time")
         plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
         plt.legend()
 

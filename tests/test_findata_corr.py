@@ -7,6 +7,7 @@ synthetic market whose correlations are exact by construction.
 
 from __future__ import annotations
 
+import datetime as dt
 from math import isnan
 from statistics import mean
 
@@ -17,7 +18,7 @@ from findata_corr import PackCorrelation
 
 
 def _pack_for(extractor) -> PackCorrelation:
-    pack = PackCorrelation(extractor.data, extractor.ticker_dates)
+    pack = PackCorrelation(extractor.data)
     pack.define_alpha("ALPHA")
     pack.find_pack_correlation(plot_av=False)
 
@@ -28,9 +29,9 @@ def test_find_pack_correlation_identifies_pack_members(extractor):
     pack = _pack_for(extractor)
 
     assert len(pack.corr_date) == len(TRADING_DAYS)
+    assert list(pack.corr_date.index.date) == TRADING_DAYS
 
-    row = pack.corr_date.iloc[0]
-    assert row["Day"] == [3, 21, 2022]
+    row = pack.corr_date.loc["2022-03-21"]
 
     assert row["Beta"] == "TWIN"  # most correlated
     assert row["Epsilon"] == "MID"  # median correlated
@@ -45,7 +46,7 @@ def test_find_pack_correlation_identifies_pack_members(extractor):
     assert row["Alpha Gain"] == pytest.approx(1.05)
     assert row["Dir Corr"] == pytest.approx(mean(EXPECTED_CORR.values()))
 
-    distribution = pack.dist_date[(2022, 3, 21)]
+    distribution = pack.dist_date[dt.date(2022, 3, 21)]
     assert sorted(distribution) == pytest.approx(sorted(EXPECTED_CORR.values()))
 
 
@@ -70,4 +71,4 @@ def test_days_without_usable_correlations_are_skipped(disjoint_extractor):
     pack = _pack_for(disjoint_extractor)
 
     assert len(pack.corr_date) == 0
-    assert pack.dist_date[(2022, 3, 21)] == []
+    assert pack.dist_date[dt.date(2022, 3, 21)] == []
