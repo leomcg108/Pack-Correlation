@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import logging
 import os
 import pickle
 from collections.abc import Callable
@@ -11,6 +12,28 @@ from collections.abc import Callable
 import matplotlib.pyplot as plt
 import pandas as pd
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
+
+# a full session is 09:30 to 16:00 less the closing bar
+FULL_TRADING_DAY_BARS = 389
+
+# Yahoo Finance only serves about 30 days of 1-minute bars, after which a
+# gap in the record can never be filled from it again
+INTRADAY_HISTORY_DAYS = 30
+
+# how many of the worst tickers to name individually in a data-quality report
+WORST_OFFENDERS = 5
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Send this module's progress messages to the console.
+
+    Without it only warnings are shown, which is the right default when
+    these modules are imported by other code. Call it once for the running
+    commentary during downloads and data checks.
+    """
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s", force=True)
 
 
 class FinDataExtract:
@@ -72,7 +95,7 @@ class FinDataExtract:
             data = data.drop(data.tail(1).index)
             total_data = pd.concat([data, total_data])
 
-        print(f"{ticker} data downloaded from Yahoo Finance")
+        logger.info("%s data downloaded from Yahoo Finance", ticker)
 
         csv_path = f"{data_path}-1m.csv"
         if not new_ticker:
@@ -80,15 +103,18 @@ class FinDataExtract:
             total_data = pd.concat([old_data, total_data])
 
         total_data.to_csv(csv_path)
-        print(f"{ticker} data written to csv file\n")
+        logger.info("%s data written to csv file", ticker)
 
-    def download_ticker_data(self, weeks: int = 4) -> None:
+    def download_ticker_data(self, weeks: int = 4, verify: bool = True) -> None:
         """Update up to `weeks` of 1-minute data for every watchlist ticker.
 
         Existing tickers are updated incrementally; new tickers are
         downloaded in full (up to the 4-week limit Yahoo Finance allows for
         1-minute bars). Assumes CSV filenames follow the pattern
         "TICK-1m.csv".
+
+        Unless `verify` is False the freshly written files are then loaded
+        and checked, so gaps are reported while they can still be refilled.
         """
         if self.watchlist is None:
             self.watchlist = self.pop_watchlist()
@@ -102,7 +128,7 @@ class FinDataExtract:
 
         for ticker in self.watchlist:
             if ticker in file_list:
-                print(ticker)
+                logger.info("Updating %s", ticker)
                 data_path = os.path.join(self.file_path, file_list[ticker])
                 file_check = pd.read_csv(data_path, nrows=1)
 
@@ -118,10 +144,14 @@ class FinDataExtract:
                 self.update_1m_28day(ticker, weeks)
             else:
                 # new ticker: obtain the max allowed 4 weeks of 1m bars
-                print(f"New: {ticker}")
+                logger.info("New ticker %s", ticker)
                 self.update_1m_28day(ticker, 4, True)
 
-        print("All data downloaded")
+        logger.info("All data downloaded")
+
+        if verify:
+            self.pop_data_dict()
+            self.report_data_quality()
 
     def pop_data_dict(self) -> None:
         """Load every ticker CSV in `file_path` into `self.data`.
@@ -138,7 +168,7 @@ class FinDataExtract:
                 continue
 
             ticker = file.name.split("-")[0]
-            print(ticker)
+            logger.debug("Loading %s", ticker)
 
             frame = pd.read_csv(os.path.join(self.file_path, file.name))
 
@@ -182,10 +212,10 @@ class FinDataExtract:
         if ticker is None:
             ticker = next(iter(self.data))
         if ticker not in self.data:
-            print(f"{ticker} not found in data")
+            logger.warning("%s not found in data", ticker)
             return None
 
-        print(f"Data slice for {ticker}")
+        logger.debug("Data slice for %s", ticker)
 
         return self.data[ticker].loc[start_date:end_date]
 
@@ -200,7 +230,7 @@ class FinDataExtract:
         if ticker is None:
             ticker = next(iter(self.data))
         if ticker not in self.data:
-            print(f"{ticker} not found in data")
+            logger.warning("%s not found in data", ticker)
             return
 
         series = self.slice_data(ticker, start_date, end_date)
@@ -209,7 +239,7 @@ class FinDataExtract:
         plt.xlabel("Time")
         plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
         plt.legend()
-        print(f"{plot_series}-data plotted for {ticker}")
+        logger.debug("%s-data plotted for %s", plot_series, ticker)
 
     def data_by_date(
         self, ticker: str | None = None
@@ -276,12 +306,93 @@ class FinDataExtract:
 
             if minute_check:
                 missed_mins_ticker[ticker] = [
-                    (day, 389 - bars)
+                    (day, FULL_TRADING_DAY_BARS - bars)
                     for day, bars in bars_per_day.items()
-                    if bars < 389
+                    if bars < FULL_TRADING_DAY_BARS
                 ]
 
         return missed_days_ticker, missed_mins_ticker
+
+    def report_data_quality(
+        self, minute_check: bool = True
+    ) -> tuple[dict[str, list[dt.date]], dict[str, list[tuple[dt.date, int]]]]:
+        """Run `verify_data` and log what it found.
+
+        Only the worst few tickers are named individually, so a watchlist of
+        several hundred still produces a readable report. Returns whatever
+        `verify_data` returned, for callers that want the detail.
+        """
+        if not self.data:
+            logger.warning("No data loaded, so there is nothing to check")
+            return {}, {}
+
+        missed_days, missed_minutes = self.verify_data(minute_check=minute_check)
+
+        if missed_days:
+            total = sum(len(days) for days in missed_days.values())
+            logger.warning(
+                "%d of %d tickers are missing trading days (%d in total)",
+                len(missed_days),
+                len(self.data),
+                total,
+            )
+            worst = sorted(
+                missed_days.items(), key=lambda item: len(item[1]), reverse=True
+            )
+            for ticker, days in worst[:WORST_OFFENDERS]:
+                logger.warning(
+                    "  %s: %d missing, earliest %s", ticker, len(days), min(days)
+                )
+        else:
+            logger.info("Every ticker covers the full range of trading days")
+
+        incomplete = {t: gaps for t, gaps in missed_minutes.items() if gaps}
+        if incomplete:
+            total = sum(len(gaps) for gaps in incomplete.values())
+            logger.warning(
+                "%d tickers have days short of a full session (%d days in total)",
+                len(incomplete),
+                total,
+            )
+            worst = sorted(
+                incomplete.items(), key=lambda item: len(item[1]), reverse=True
+            )
+            for ticker, gaps in worst[:WORST_OFFENDERS]:
+                day, missing = max(gaps, key=lambda gap: gap[1])
+                logger.warning(
+                    "  %s: %d short days, worst %s (%d minutes missing)",
+                    ticker,
+                    len(gaps),
+                    day,
+                    missing,
+                )
+        elif minute_check:
+            logger.info("Every trading day holds a full session of bars")
+
+        self._warn_if_stale()
+
+        return missed_days, missed_minutes
+
+    def _warn_if_stale(self) -> None:
+        """Warn when the record is old enough that gaps become permanent."""
+        latest = max(frame.index[-1] for frame in self.data.values())
+        age = (dt.datetime.now() - latest).days
+
+        if age >= INTRADAY_HISTORY_DAYS:
+            logger.warning(
+                "Most recent bar is %d days old. Yahoo Finance serves only "
+                "about %d days of 1-minute data, so anything older than that "
+                "can no longer be backfilled",
+                age,
+                INTRADAY_HISTORY_DAYS,
+            )
+        else:
+            logger.info(
+                "Most recent bar is %d days old (%d days before it falls "
+                "outside the 1-minute history window)",
+                age,
+                INTRADAY_HISTORY_DAYS - age,
+            )
 
     def load_pickle(self, pickle_path: str, data_name: str) -> None:
         """Load a previously pickled `data` dictionary from disk."""

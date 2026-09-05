@@ -6,12 +6,15 @@ https://github.com/leomcg108/Pack-Correlation/
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from statistics import mean, median, median_high, stdev
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+logger = logging.getLogger(__name__)
 
 CORR_COLUMNS = [
     "Av Corr",
@@ -59,7 +62,7 @@ class PackCorrelation:
         if alpha in self.data:
             self.alpha = alpha
         else:
-            print(f"{alpha} not in data dictionary")
+            logger.warning("%s not in data dictionary", alpha)
 
     def trading_days(self) -> pd.DatetimeIndex:
         """Return the distinct days the alpha has data for."""
@@ -331,10 +334,10 @@ class PackCorrelation:
         if ticker is None:
             ticker = self.alpha
         if ticker not in self.data:
-            print(f"{ticker} not found in data")
+            logger.warning("%s not found in data", ticker)
             return None
 
-        print(f"Data slice for {ticker}")
+        logger.debug("Data slice for %s", ticker)
 
         return self.data[ticker].loc[start_date:end_date]
 
@@ -349,7 +352,7 @@ class PackCorrelation:
         if ticker is None:
             ticker = self.alpha
         if ticker not in self.data:
-            print(f"{ticker} not found in data")
+            logger.warning("%s not found in data", ticker)
             return
 
         series = self.slice_data(ticker, start_time, end_time)
@@ -359,4 +362,4 @@ class PackCorrelation:
         plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
         plt.legend()
 
-        print(f"{plot_series}-data plotted for {ticker}")
+        logger.debug("%s-data plotted for %s", plot_series, ticker)

@@ -8,10 +8,17 @@ having.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import pandas as pd
 
-from conftest import BARS_PER_DAY, CLOSES, TRADING_DAYS
+from conftest import (
+    BARS_PER_DAY,
+    CLOSES,
+    TRADING_DAYS,
+    _extractor_for,
+    _write_ticker_csv,
+)
 from findata_extraction import FinDataExtract
 
 
@@ -73,7 +80,7 @@ def test_download_ticker_data_creates_then_appends(tmp_path):
     fde.set_file_path(str(tmp_path))
     fde.watchlist = ["NEW"]
 
-    fde.download_ticker_data(weeks=1)
+    fde.download_ticker_data(weeks=1, verify=False)
 
     csv_path = tmp_path / "NEW-1m.csv"
     assert csv_path.exists()
@@ -81,7 +88,51 @@ def test_download_ticker_data_creates_then_appends(tmp_path):
     new_ticker_rows = len(pd.read_csv(csv_path))
     assert new_ticker_rows == 4 * 2  # 3 bars per week, final bar dropped
 
-    fde.download_ticker_data(weeks=1)
+    fde.download_ticker_data(weeks=1, verify=False)
 
     assert len(calls) == 5  # a known ticker only pulls the weeks asked for
     assert len(pd.read_csv(csv_path)) == new_ticker_rows + 2
+
+
+def test_download_checks_the_data_it_wrote(tmp_path, caplog):
+    """Verification runs off the back of a download, not as a separate step."""
+
+    def fake_downloader(ticker, start, end, interval):
+        index = pd.date_range(
+            dt.datetime.combine(start, dt.time(9, 30)),
+            periods=3,
+            freq="min",
+            name="Datetime",
+        )
+        return pd.DataFrame(
+            {"Open": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0]}, index=index
+        )
+
+    fde = FinDataExtract(downloader=fake_downloader)
+    fde.set_file_path(str(tmp_path))
+    fde.watchlist = ["NEW"]
+
+    with caplog.at_level(logging.WARNING):
+        fde.download_ticker_data(weeks=1)
+
+    # the download leaves the data loaded and already checked
+    assert set(fde.data) == {"NEW"}
+    assert "short of a full session" in caplog.text
+
+
+def test_report_data_quality_names_the_ticker_missing_days(tmp_path, caplog):
+    """A silent monitor is worthless, so the gap has to reach the log."""
+    _write_ticker_csv(tmp_path, "ALPHA", CLOSES["ALPHA"])
+    _write_ticker_csv(
+        tmp_path,
+        "PATCHY",
+        CLOSES["TWIN"],
+        days=[TRADING_DAYS[0], TRADING_DAYS[2]],  # skips the Tuesday
+    )
+    fde = _extractor_for(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        missed_days, _ = fde.report_data_quality(minute_check=False)
+
+    assert missed_days == {"PATCHY": [TRADING_DAYS[1]]}
+    assert "PATCHY" in caplog.text

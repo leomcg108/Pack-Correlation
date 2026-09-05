@@ -33,6 +33,7 @@ So therefore the other members of the pack can be defined as follows:
 * Calculate an average correlation for group of stocks to a predefined lead/alpha stock for each day under consideration
 * Helps characterize a stock’s price movement relative to the alpha e.g. highly correlated, uncorrelated or anticorrelated
 * Visualize the distribution of correlations of stocks to the alpha for a given day or the whole date range
+* Checks downloaded data for missing days and short sessions automatically, and warns as the record approaches the ~30 day limit beyond which Yahoo Finance can no longer backfill 1-minute bars
 
 ## Prerequisites
 * Python
@@ -47,7 +48,11 @@ So therefore the other members of the pack can be defined as follows:
 `PackCorrelation` takes `data`, a dictionary of dataframes keyed by ticker, where each dataframe is indexed by its bar timestamps. A single day is then a label slice — `data["SPY"].loc["2022-04-01"]` — and the trading days themselves come straight from the index, so no separate table of row offsets is needed. The `FinDataExtract` class builds this structure from a directory of csv files with its `pop_data_dict` method. More details can be found in the complementary repository [here](https://github.com/leomcg108/FinData-Extraction).
 
 ```python
-from findata_extraction import FinDataExtract
+from findata_extraction import FinDataExtract, configure_logging
+
+# Progress is logged rather than printed. Without this call only warnings
+# are shown, which is what you want when importing these modules elsewhere.
+>>> configure_logging()
 
 # Create instance of class
 >>> fde = FinDataExtract()
@@ -58,8 +63,17 @@ from findata_extraction import FinDataExtract
 # create a list of tickers from a given csv file e.g. members of S&P 500 index
 >>> fde.pop_watchlist(watchlist_path=".//Watchlist//sp500.csv")
 
-# Download 4 weeks of 1m intraday data for each ticker from Yahoo Finance using the yfinance library 
+# Download 4 weeks of 1m intraday data for each ticker from Yahoo Finance using the
+# yfinance library. The files written are then loaded and checked automatically.
 >>> fde.download_ticker_data()
+
+INFO: Updating SPY
+INFO: SPY data downloaded from Yahoo Finance
+...
+INFO: All data downloaded
+WARNING: 3 of 560 tickers are missing trading days (7 in total)
+WARNING:   CVS: 4 missing, earliest 2022-03-14
+WARNING: Most recent bar is 2 days old (28 days before it falls outside the 1-minute history window)
 
 # Create a dictionary of dataframes as values and the stock ticker as corresponding key
 >>> fde.pop_data_dict()
