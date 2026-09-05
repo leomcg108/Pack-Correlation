@@ -6,6 +6,7 @@ import csv
 import datetime as dt
 import os
 import pickle
+from collections.abc import Callable
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -13,17 +14,24 @@ import yfinance as yf
 
 
 class FinDataExtract:
-    """Download, update, and slice intraday ticker data stored as CSV files."""
+    """Download, update, and slice intraday ticker data stored as CSV files.
+
+    `downloader` is the callable used to fetch bars; it defaults to
+    `yfinance.download` and can be replaced to source data elsewhere or to
+    exercise the pipeline without network access.
+    """
 
     def __init__(
         self,
         data: dict[str, pd.DataFrame] | None = None,
         ticker_dates: dict[str, list[list[int]]] | None = None,
+        downloader: Callable[..., pd.DataFrame] = yf.download,
     ) -> None:
         self.data = data
         self.ticker_dates = ticker_dates
         self.file_path = os.getcwd()
         self.watchlist: list[str] | None = None
+        self.downloader = downloader
 
     def __repr__(self) -> str:
         return "FinDataExtraction object"
@@ -58,7 +66,7 @@ class FinDataExtract:
         for week_offset in range(1, weeks + 1):
             start = dt.date.today() - dt.timedelta(weeks=week_offset)
             end = start + dt.timedelta(days=7)
-            data = yf.download(ticker, start, end, interval="1m")
+            data = self.downloader(ticker, start, end, interval="1m")
             data = data.drop(data.tail(1).index)
             total_data = pd.concat([data, total_data])
 
