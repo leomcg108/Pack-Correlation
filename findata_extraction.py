@@ -9,9 +9,10 @@ import os
 import pickle
 from collections.abc import Callable
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import yfinance as yf
+
+from findata_access import TickerDataAccess
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s", force=True)
 
 
-class FinDataExtract:
+class FinDataExtract(TickerDataAccess):
     """Download, update, and slice intraday ticker data stored as CSV files.
 
     Every frame in `data` is indexed by its bar timestamps, so a day is a
@@ -197,49 +198,6 @@ class FinDataExtract:
             ticker = next(iter(self.data))
 
         return self.data[ticker].index.normalize().unique()
-
-    def slice_data(
-        self,
-        ticker: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> pd.DataFrame | None:
-        """Return the rows between two dates, both days included.
-
-        Dates are "YYYY-MM-DD" strings; either end may be omitted to run to
-        the start or end of the available data.
-        """
-        if ticker is None:
-            ticker = next(iter(self.data))
-        if ticker not in self.data:
-            logger.warning("%s not found in data", ticker)
-            return None
-
-        logger.debug("Data slice for %s", ticker)
-
-        return self.data[ticker].loc[start_date:end_date]
-
-    def plot_data(
-        self,
-        ticker: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        plot_series: str = "Close",
-    ) -> None:
-        """Plot data for a given ticker and datetime range."""
-        if ticker is None:
-            ticker = next(iter(self.data))
-        if ticker not in self.data:
-            logger.warning("%s not found in data", ticker)
-            return
-
-        series = self.slice_data(ticker, start_date, end_date)
-
-        plt.plot(series[plot_series], label=ticker)
-        plt.xlabel("Time")
-        plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
-        plt.legend()
-        logger.debug("%s-data plotted for %s", plot_series, ticker)
 
     def data_by_date(
         self, ticker: str | None = None

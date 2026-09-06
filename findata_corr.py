@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from findata_access import TickerDataAccess
+
 logger = logging.getLogger(__name__)
 
 CORR_COLUMNS = [
@@ -33,7 +35,7 @@ CORR_COLUMNS = [
 ]
 
 
-class PackCorrelation:
+class PackCorrelation(TickerDataAccess):
     """Correlate a basket of assets against a target asset (alpha).
 
     Builds `corr_date`, a dataframe indexed by trading day holding the
@@ -63,6 +65,10 @@ class PackCorrelation:
             self.alpha = alpha
         else:
             logger.warning("%s not in data dictionary", alpha)
+
+    def default_ticker(self) -> str:
+        """Reach for the alpha, rather than whichever ticker comes first."""
+        return self.alpha
 
     def trading_days(self) -> pd.DatetimeIndex:
         """Return the distinct days the alpha has data for."""
@@ -324,42 +330,3 @@ class PackCorrelation:
         heatmap.set_xlabel("Days")
         heatmap.set_ylabel("Correlation")
 
-    def slice_data(
-        self,
-        ticker: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> pd.DataFrame | None:
-        """Return the rows between two dates, both days included."""
-        if ticker is None:
-            ticker = self.alpha
-        if ticker not in self.data:
-            logger.warning("%s not found in data", ticker)
-            return None
-
-        logger.debug("Data slice for %s", ticker)
-
-        return self.data[ticker].loc[start_date:end_date]
-
-    def plot_data(
-        self,
-        ticker: str | None = None,
-        start_time: str | None = None,
-        end_time: str | None = None,
-        plot_series: str = "Close",
-    ) -> None:
-        """Plot data for a given ticker and datetime range."""
-        if ticker is None:
-            ticker = self.alpha
-        if ticker not in self.data:
-            logger.warning("%s not found in data", ticker)
-            return
-
-        series = self.slice_data(ticker, start_time, end_time)
-
-        plt.plot(series[plot_series], label=ticker)
-        plt.xlabel("Time")
-        plt.ylabel("Volume" if plot_series == "Volume" else "Stock Price (USD)")
-        plt.legend()
-
-        logger.debug("%s-data plotted for %s", plot_series, ticker)

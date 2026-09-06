@@ -206,7 +206,7 @@ Mode: 0.46
 Data slice for DHR
 
 # similarly, plot the “Close” data for a ticker for a given date range
->>> pack.plot_data("TSLA", start_time="2022-03-01", end_time="2022-03-31", plot_series="Close")
+>>> pack.plot_data("TSLA", start_date="2022-03-01", end_date="2022-03-31", plot_series="Close")
 Data slice for TSLA
 Close-data plotted for TSLA
 ```
